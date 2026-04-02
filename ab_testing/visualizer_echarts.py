@@ -140,7 +140,7 @@ def loss_chart(result: "BayesianResult", loss_threshold: float) -> dict:
 
 
 # ── 4. 频率派均值对比图（含置信区间 markArea）───────────────────
-def freq_chart(result: "FrequentistResult", metric_label: str = "指标") -> dict:
+def freq_chart(result: "FrequentistResult", metric_label: str = "指标", mde: float | None = None) -> dict:
     """
     A/B 均值柱状图。
     B 组附加 delta 95% CI 的阴影区间（markArea），delta=0 参考线辅助判断显著性。
@@ -154,13 +154,23 @@ def freq_chart(result: "FrequentistResult", metric_label: str = "指标") -> dic
     ci_abs_low  = round(ref_a + ci_low, 6)   # B 均值 + CI下界 ≈ 置信区间下端绝对值
     ci_abs_high = round(ref_a + ci_high, 6)  # B 均值 + CI上界 ≈ 置信区间上端绝对值
 
+    # MDE 参考线（A 均值 + MDE）
+    mark_lines = [{"yAxis": ref_a, "name": f"A 均值 {ref_a}", "lineStyle": {"color": C_A}}]
+    if mde is not None:
+        ref_mde = round(ref_a + mde, 6)
+        mark_lines.append({"yAxis": ref_mde, "name": f"A+MDE {ref_mde}", "lineStyle": {"color": C_THRESH, "type": "dotted"}})
+
+    title_text = (
+        f"p = {result.p_value:.4f}  {sig_label}  |  "
+        f"效应量 = {result.effect_size:.4f}  |  "
+        f"delta 95% CI = [{ci_low:+.4f}, {ci_high:+.4f}]"
+    )
+    if mde is not None:
+        title_text += f"  |  MDE = {mde:.4f}"
+
     return {
         "title": {
-            "text": (
-                f"p = {result.p_value:.4f}  {sig_label}  |  "
-                f"效应量 = {result.effect_size:.4f}  |  "
-                f"delta 95% CI = [{ci_low:+.4f}, {ci_high:+.4f}]"
-            ),
+            "text": title_text,
             "textStyle": {"fontSize": 12, "fontWeight": "normal", "color": sig_color},
             "top": 5,
         },
@@ -183,17 +193,15 @@ def freq_chart(result: "FrequentistResult", metric_label: str = "指标") -> dic
                 ],
                 "barWidth": "40%",
                 "label": {"show": True, "position": "top", "formatter": "{c}"},
-                # A 组均值参考线
+                # A 组均值和 MDE 参考线
                 "markLine": {
                     "symbol": "none",
-                    "lineStyle": {"color": C_A, "type": "dashed", "width": 1.5},
+                    "lineStyle": {"type": "dashed", "width": 1.5},
                     "label": {
-                        "formatter": f"A 均值 {ref_a}",
                         "position": "insideEndTop",
                         "fontSize": 10,
-                        "color": C_A,
                     },
-                    "data": [{"yAxis": ref_a}],
+                    "data": mark_lines,
                 },
                 # delta 95% CI 阴影区间（覆盖 B 柱）
                 "markArea": {

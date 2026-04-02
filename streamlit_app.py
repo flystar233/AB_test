@@ -87,104 +87,139 @@ with st.sidebar:
 
     st.divider()
     st.subheader("统计参数")
-    alpha = st.slider("显著性水平 α（频率派）", 0.01, 0.10, 0.05, 0.01)
+    alpha = 0.05
+    if method != "bayesian":
+        alpha = st.slider("显著性水平 α（频率派）", 0.01, 0.10, 0.05, 0.01)
     mde = st.number_input(
         "MDE 最小可检测提升",
         value=0.005 if metric_type == "binary" else 3.0,
         format="%.4f",
         help="与指标同量纲，二值用绝对差值，连续用金额差",
     )
-    loss_threshold = st.number_input(
-        "期望损失阈值（贝叶斯停止准则）",
-        value=0.001 if metric_type == "binary" else 1.0,
-        format="%.4f",
-    )
 
-    st.divider()
-    st.subheader("贝叶斯先验")
-    st.caption(
-        "⚠️ 先验必须来自**实验开始前**的独立历史数据或业务经验，"
-        "**不能**使用当前 AB 测试数据估算，否则数据被重复使用，后验失真。"
-    )
 
-    prior_source = st.radio(
-        "先验参数来源",
-        ["手动输入", "上传历史数据自动估算"],
-        horizontal=True,
-        help="历史数据：实验前的同指标数据集（独立于当前 AB 测试）",
-    )
+    # ── 贝叶斯参数（仅在非仅频率派时显示）────────────────────────────
+    if method != "frequentist":
+        st.divider()
+        st.subheader("贝叶斯参数")
+        loss_threshold = st.number_input(
+            "期望损失阈值（停止准则）",
+            value=0.001 if metric_type == "binary" else 1.0,
+            format="%.4f",
+        )
 
-    # 先验参数默认值（无信息先验）
-    historical_rate = 0.5
-    historical_mean = None
-    historical_std  = None
-    nu_expected     = 30.0
-    prior_strength  = 2
+        # 采样参数
+        n_samples = 200000
+        mcmc_draws = 2000
 
-    if prior_source == "手动输入":
         if metric_type == "binary":
-            historical_rate = st.slider(
-                "历史转化率",
-                0.01, 0.99, 0.44, 0.01,
-                help="来源：历史报表或上一期实验结论，不得使用当前测试数据均值",
-            )
-        else:  # continuous
-            historical_mean = st.number_input(
-                "历史均值（mu）",
-                value=50.0, format="%.2f",
-                help="与指标同量纲，来自实验前历史数据的均值",
-            )
-            historical_std = st.number_input(
-                "历史标准差（sigma）",
-                value=30.0, min_value=0.01, format="%.2f",
-                help="历史数据的标准差，控制先验的不确定性范围",
-            )
-            nu_expected = st.slider(
-                "自由度先验期望（nu）",
-                min_value=3, max_value=100, value=30,
-                help=(
-                    "控制 StudentT 尾部厚度：\n"
-                    "• nu ≈ 3–5：极厚尾，适合高度离群的收入数据\n"
-                    "• nu ≈ 10–20：中等厚尾，常见收入场景\n"
-                    "• nu ≈ 30+：接近正态分布"
-                ),
-            )
-        prior_strength = st.slider(
-            "先验强度（等效历史样本量）",
-            min_value=1, max_value=500, value=100,
-            help="越大表示越信任历史数据；样本量充足时建议设低（≤10）",
-        )
-
-    else:  # 上传历史数据自动估算
-        hist_file = st.file_uploader(
-            "上传历史数据 CSV（实验前数据，独立数据集）",
-            type=["csv"],
-            key="hist_upload",
-        )
-        if hist_file:
-            hist_df   = pd.read_csv(hist_file)
-            hist_col  = st.selectbox("选择指标列", hist_df.columns.tolist(), key="hist_col")
-            hist_vals = hist_df[hist_col].dropna().values.astype(float)
-
-            if metric_type == "binary":
-                historical_rate = float(hist_vals.mean())
-                st.success(f"估算历史转化率：**{historical_rate:.4f}**（n={len(hist_vals):,}）")
-            else:
-                historical_mean = float(hist_vals.mean())
-                historical_std  = float(hist_vals.std())
-                st.success(
-                    f"估算历史均值：**{historical_mean:.4f}**  "
-                    f"标准差：**{historical_std:.4f}**（n={len(hist_vals):,}）"
-                )
-
-            prior_strength = st.slider(
-                "先验强度",
-                min_value=1, max_value=500,
-                value=min(max(int(len(hist_vals) / 10), 1), 200),
-                help="建议设为历史样本量的 1/10 左右，避免先验过强压制实验数据",
+            n_samples = st.number_input(
+                "蒙特卡洛采样数",
+                min_value=10000, max_value=1000000, value=200000, step=10000,
+                help="越大后验越稳定，但计算时间越长",
             )
         else:
-            st.info("请上传历史数据文件，将自动估算先验参数")
+            mcmc_draws = st.number_input(
+                "MCMC 采样数",
+                min_value=500, max_value=10000, value=2000, step=100,
+                help="越大后验越稳定，但计算时间越长",
+            )
+
+        st.divider()
+        st.subheader("贝叶斯先验")
+        st.caption(
+            "⚠️ 先验必须来自**实验开始前**的独立历史数据或业务经验，"
+            "**不能**使用当前 AB 测试数据估算，否则数据被重复使用，后验失真。"
+        )
+
+        prior_source = st.radio(
+            "先验参数来源",
+            ["手动输入", "上传历史数据自动估算"],
+            horizontal=True,
+            help="历史数据：实验前的同指标数据集（独立于当前 AB 测试）",
+        )
+
+        # 先验参数默认值（无信息先验）
+        historical_rate = 0.5
+        historical_mean = None
+        historical_std  = None
+        nu_expected     = 30.0
+        prior_strength  = 2
+
+        if prior_source == "手动输入":
+            if metric_type == "binary":
+                historical_rate = st.slider(
+                    "历史转化率",
+                    0.01, 0.99, 0.44, 0.01,
+                    help="来源：历史报表或上一期实验结论，不得使用当前测试数据均值",
+                )
+            else:  # continuous
+                historical_mean = st.number_input(
+                    "历史均值（mu）",
+                    value=50.0, format="%.2f",
+                    help="与指标同量纲，来自实验前历史数据的均值",
+                )
+                historical_std = st.number_input(
+                    "历史标准差（sigma）",
+                    value=30.0, min_value=0.01, format="%.2f",
+                    help="历史数据的标准差，控制先验的不确定性范围",
+                )
+                nu_expected = st.slider(
+                    "自由度先验期望（nu）",
+                    min_value=3, max_value=100, value=30,
+                    help=(
+                        "控制 StudentT 尾部厚度：\n"
+                        "• nu ≈ 3–5：极厚尾，适合高度离群的收入数据\n"
+                        "• nu ≈ 10–20：中等厚尾，常见收入场景\n"
+                        "• nu ≈ 30+：接近正态分布"
+                    ),
+                )
+            prior_strength = st.slider(
+                "先验强度（等效历史样本量）",
+                min_value=1, max_value=500, value=100,
+                help="越大表示越信任历史数据；样本量充足时建议设低（≤10）",
+            )
+
+        else:  # 上传历史数据自动估算
+            hist_file = st.file_uploader(
+                "上传历史数据 CSV（实验前数据，独立数据集）",
+                type=["csv"],
+                key="hist_upload",
+            )
+            if hist_file:
+                hist_df   = pd.read_csv(hist_file)
+                hist_col  = st.selectbox("选择指标列", hist_df.columns.tolist(), key="hist_col")
+                hist_vals = hist_df[hist_col].dropna().values.astype(float)
+
+                if metric_type == "binary":
+                    historical_rate = float(hist_vals.mean())
+                    st.success(f"估算历史转化率：**{historical_rate:.4f}**（n={len(hist_vals):,}）")
+                else:
+                    historical_mean = float(hist_vals.mean())
+                    historical_std  = float(hist_vals.std())
+                    st.success(
+                        f"估算历史均值：**{historical_mean:.4f}**  "
+                        f"标准差：**{historical_std:.4f}**（n={len(hist_vals):,}）"
+                    )
+
+                prior_strength = st.slider(
+                    "先验强度",
+                    min_value=1, max_value=500,
+                    value=min(max(int(len(hist_vals) / 10), 1), 200),
+                    help="建议设为历史样本量的 1/10 左右，避免先验过强压制实验数据",
+                )
+            else:
+                st.info("请上传历史数据文件，将自动估算先验参数")
+    else:
+        # 仅频率派时的默认值
+        loss_threshold  = 0.001 if metric_type == "binary" else 1.0
+        n_samples       = 200000
+        mcmc_draws      = 2000
+        historical_rate = 0.5
+        historical_mean = None
+        historical_std  = None
+        nu_expected     = 30.0
+        prior_strength  = 2
 
 
 # ── 主区域 ────────────────────────────────────────────────────────
@@ -214,13 +249,13 @@ if data_source == "示例数据（Cookie Cats）":
         st.caption(f"对照组：`{control_label}`  |  实验组：`{treatment_label}`")
     with col_info2:
         st.caption(f"共 {len(df):,} 条记录")
-    st.dataframe(df.head(5), use_container_width=True)
+    st.dataframe(df.head(5), width="stretch")
 
 else:
     uploaded = st.file_uploader("上传 CSV 文件", type=["csv"])
     if uploaded:
         df = pd.read_csv(uploaded)
-        st.dataframe(df.head(5), use_container_width=True)
+        st.dataframe(df.head(5), width="stretch")
 
         cols = df.columns.tolist()
 
@@ -276,10 +311,10 @@ col_btn, col_status = st.columns([2, 5])
 with col_btn:
     if not running:
         run_btn = st.button("🚀 运行分析", type="primary",
-                            disabled=not ready, use_container_width=True)
+                            disabled=not ready, width="stretch")
     else:
         stop_btn = st.button("⏹ 停止分析", type="secondary",
-                             use_container_width=True)
+                             width="stretch")
 
 with col_status:
     status_placeholder = st.empty()
@@ -296,6 +331,8 @@ if not running and ready and "run_btn" in dir() and run_btn:
         mde=float(mde),
         loss_threshold=float(loss_threshold),
         prior_strength=prior_strength,
+        n_samples=n_samples,
+        mcmc_draws=mcmc_draws,
     )
     if metric_type == "binary":
         pipeline_kwargs["historical_rate"] = historical_rate
@@ -421,18 +458,25 @@ if "result" in st.session_state:
         f = result.frequentist
         sig_sub   = ("显著 ✓" if f.significant else "不显著 ✗")
         sig_color = "#27ae60" if f.significant else "#888"
+
+        # 与 MDE 对比
+        delta_vs_mde = f.delta >= pipeline.mde
+        mde_sub = "达到 MDE ✓" if delta_vs_mde else "未达 MDE ✗"
+        mde_color = "#27ae60" if delta_vs_mde else "#888"
+
         _kpi_row([
             ("A 组均值",  f"{f.mean_a:.4f}"),
-            ("B 组均值",  f"{f.mean_b:.4f}", f"delta {f.delta:+.4f}"),
+            ("B 组均值",  f"{f.mean_b:.4f}"),
             ("p 值",      f"{f.p_value:.4f}", sig_sub, sig_color),
             ("效应量",    f"{f.effect_size:.4f}"),
+            ("delta vs MDE", f"{f.delta:+.4f} vs {pipeline.mde:.4f}", mde_sub, mde_color),
             ("95% CI",   f"[{f.ci[0]:+.4f}, {f.ci[1]:+.4f}]"),
         ])
     if result.bayesian:
         b = result.bayesian
         _kpi_row([
             ("A 后验均值",    f"{b.mean_a:.4f}"),
-            ("B 后验均值",    f"{b.mean_b:.4f}", f"delta {b.delta_mean:+.4f}"),
+            ("B 后验均值",    f"{b.mean_b:.4f}"),
             ("P(B > A)",     f"{b.prob_b_better:.1%}"),
             ("P(delta>MDE)", f"{b.prob_practical:.1%}"),
             ("选A期望损失",   f"{b.expected_loss_a:.5f}"),
@@ -445,7 +489,7 @@ if "result" in st.session_state:
     if result.frequentist:
         st.markdown("#### 频率派：均值对比 & 置信区间")
         st_echarts(
-            options=freq_chart(result.frequentist, metric_label=m_label),
+            options=freq_chart(result.frequentist, metric_label=m_label, mde=pipeline.mde),
             height="380px",
             key="chart_freq",
         )

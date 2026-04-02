@@ -37,6 +37,7 @@ class ABTestResult:
 
         if self.frequentist:
             f = self.frequentist
+            stat_label = "z 统计量" if self.metric_type == "binary" else "t 统计量"
             lines += [
                 "",
                 "【频率派】",
@@ -44,7 +45,7 @@ class ABTestResult:
                 f"  B 组均值：{f.mean_b:.4f}",
                 f"  delta  ：{f.delta:+.4f}  (B - A)",
                 f"  95% CI ：[{f.ci[0]:+.4f}, {f.ci[1]:+.4f}]",
-                f"  统计量 ：{f.statistic:.4f}",
+                f"  {stat_label}：{f.statistic:.4f}",
                 f"  p 值   ：{f.p_value:.4f}",
                 f"  效应量 ：{f.effect_size:.4f}",
                 f"  → 决策 ：{self.decision_freq}",
