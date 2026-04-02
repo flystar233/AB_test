@@ -1,0 +1,8 @@
+numpy>=1.24
+pandas>=1.5
+scipy>=1.10
+matplotlib>=3.6
+streamlit>=1.32
+streamlit-echarts>=0.4.0
+# PyMC v5 为可选依赖，仅在使用连续指标贝叶斯分析（BayesianContinuous）时需要
+pymc>=5.0
