@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import streamlit; print\\('Streamlit installed successfully'\\)\")",
+      "Bash(git checkout:*)",
+      "Bash(python generate_sample_data.py)"
+    ]
+  }
+}

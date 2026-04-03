@@ -1,4 +1,4 @@
-、"""
+"""
 Bayesian binary metrics: Beta-Bernoulli conjugate model
 (conversion rate, retention rate, click-through rate).
 

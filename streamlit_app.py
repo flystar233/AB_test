@@ -73,6 +73,42 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+SAMPLE_DATASETS = {
+    "Cookie Cats (binary, high, no effect)": {
+        "file": "cookie_cats.csv",
+        "group_col": "version",
+        "metric_cols": ["retention_1", "retention_7"],
+        "control_label": "gate_30",
+        "treatment_label": "gate_40",
+        "description": "Binary metric (retention), ~90k samples, no significant effect",
+    },
+    "Simulated Revenue (continuous, low, effect)": {
+        "file": "simulated_revenue.csv",
+        "group_col": "group",
+        "metric_cols": ["revenue"],
+        "control_label": "control",
+        "treatment_label": "treatment",
+        "description": "Continuous metric (revenue), ~1.5k samples, with effect",
+    },
+    "Binary Low Sample (binary, low, effect)": {
+        "file": "binary_low_sample_effect.csv",
+        "group_col": "group",
+        "metric_cols": ["converted"],
+        "control_label": "control",
+        "treatment_label": "treatment",
+        "description": "Binary metric (conversion), 1.5k samples, with clear effect",
+    },
+    "Continuous High Sample (continuous, high, effect)": {
+        "file": "continuous_high_sample_effect.csv",
+        "group_col": "group",
+        "metric_cols": ["revenue"],
+        "control_label": "control",
+        "treatment_label": "treatment",
+        "description": "Continuous metric (revenue), 25k samples, with effect",
+    },
+}
+
+# Default for backward compatibility
 SAMPLE_CSV = os.path.join(os.path.dirname(__file__), "cookie_cats.csv")
 
 
@@ -315,7 +351,7 @@ def show_analysis_page():
             st.divider()
             st.subheader("Bayesian Parameters")
             loss_threshold = st.number_input(
-                "Expected Loss Threshold (stopping criterion)",
+                "Expected Loss Threshold (decision threshold)",
                 value=0.001 if metric_type == "binary" else 1.0,
                 format="%.4f",
                 help=(
@@ -473,7 +509,7 @@ def show_analysis_page():
     st.subheader("① Load Data")
     data_source = st.radio(
         "Data source",
-        ["Sample data (Cookie Cats)", "Upload CSV"],
+        ["Sample datasets", "Upload CSV"],
         horizontal=True,
     )
 
@@ -481,19 +517,32 @@ def show_analysis_page():
     group_col = metric_col = control_label = treatment_label = None
     data_source_name = ""
 
-    if data_source == "Sample data (Cookie Cats)":
-        df = pd.read_csv(SAMPLE_CSV)
-        group_col = "version"
-        metric_col = st.selectbox("Select metric column", ["retention_1", "retention_7"])
-        control_label, treatment_label = "gate_30", "gate_40"
-        data_source_name = "Cookie Cats"
+    if data_source == "Sample datasets":
+        sample_options = list(SAMPLE_DATASETS.keys())
+        selected_sample = st.selectbox(
+            "Select sample dataset",
+            sample_options,
+            index=0,
+            help="Choose from pre-loaded sample datasets with different characteristics"
+        )
 
-        col_info1, col_info2 = st.columns(2)
-        with col_info1:
-            st.caption(f"Control: `{control_label}`  |  Treatment: `{treatment_label}`")
-        with col_info2:
-            st.caption(f"{len(df):,} total records")
-        st.dataframe(df.head(5), width="stretch")
+        if selected_sample:
+            config = SAMPLE_DATASETS[selected_sample]
+            csv_path = os.path.join(os.path.dirname(__file__), config["file"])
+            df = pd.read_csv(csv_path)
+            group_col = config["group_col"]
+            metric_col = st.selectbox("Select metric column", config["metric_cols"])
+            control_label = config["control_label"]
+            treatment_label = config["treatment_label"]
+            data_source_name = selected_sample
+
+            col_info1, col_info2 = st.columns(2)
+            with col_info1:
+                st.caption(f"Control: `{control_label}`  |  Treatment: `{treatment_label}`")
+            with col_info2:
+                st.caption(f"{len(df):,} total records")
+            st.caption(f"💡 {config['description']}")
+            st.dataframe(df.head(5), width="stretch")
 
     else:
         uploaded = st.file_uploader("Upload CSV file", type=["csv"])
