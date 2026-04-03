@@ -1,6 +1,7 @@
 """
-决策指标：纯函数层，输入后验样本 / 统计量，输出三大决策指标。
-与具体模型解耦，贝叶斯和频率派共用同一套数据类。
+Decision metrics: pure functions that take posterior samples / statistics
+and return the three core decision metrics.
+Decoupled from specific models; shared by both Bayesian and Frequentist paths.
 """
 from dataclasses import dataclass
 from typing import Tuple, Optional
@@ -9,11 +10,11 @@ import numpy as np
 
 @dataclass
 class FrequentistResult:
-    statistic: float                     # z-score 或 t-statistic
+    statistic: float                     # z-score or t-statistic
     p_value: float
-    ci: Tuple[float, float]              # 置信区间 (lower, upper)
+    ci: Tuple[float, float]              # confidence interval (lower, upper)
     significant: bool
-    effect_size: float                   # Cohen's h (二值) 或 Cohen's d (连续)
+    effect_size: float                   # Cohen's h (binary) or Cohen's d (continuous)
     mean_a: float
     mean_b: float
     delta: float                         # mean_b - mean_a
@@ -23,9 +24,9 @@ class FrequentistResult:
 class BayesianResult:
     prob_b_better: float                 # P(B > A)
     prob_practical: float                # P(delta > MDE)
-    expected_loss_a: float               # 选 A 的期望损失
-    expected_loss_b: float               # 选 B 的期望损失
-    posterior_a: np.ndarray              # 后验样本（mu 或 p）
+    expected_loss_a: float               # expected loss of choosing A
+    expected_loss_b: float               # expected loss of choosing B
+    posterior_a: np.ndarray              # posterior samples (mu or p)
     posterior_b: np.ndarray
     delta_samples: np.ndarray
     mean_a: float
@@ -39,19 +40,19 @@ def compute_bayesian_metrics(
     mde: float,
 ) -> BayesianResult:
     """
-    给定 A/B 后验样本，计算所有贝叶斯决策指标。
+    Compute all Bayesian decision metrics from posterior samples.
 
     Args:
-        samples_a: A 组后验参数样本（转化率 p 或收入均值 mu）
-        samples_b: B 组后验参数样本
-        mde:       最小可检测提升（与指标同量纲）
+        samples_a: Posterior parameter samples for group A (conversion rate p or mean mu)
+        samples_b: Posterior parameter samples for group B
+        mde:       Minimum detectable effect (same unit as the metric)
     """
     delta = samples_b - samples_a
 
-    prob_b_better = float(np.mean(delta > 0))
+    prob_b_better  = float(np.mean(delta > 0))
     prob_practical = float(np.mean(delta > mde))
-    expected_loss_a = float(np.mean(np.maximum(delta, 0)))   # 选 A 时错过 B 的收益
-    expected_loss_b = float(np.mean(np.maximum(-delta, 0)))  # 选 B 时错过 A 的收益
+    expected_loss_a = float(np.mean(np.maximum(delta, 0)))   # opportunity cost of choosing A
+    expected_loss_b = float(np.mean(np.maximum(-delta, 0)))  # opportunity cost of choosing B
 
     return BayesianResult(
         prob_b_better=prob_b_better,
@@ -69,24 +70,24 @@ def compute_bayesian_metrics(
 
 def bayesian_decision(result: BayesianResult, loss_threshold: float) -> str:
     """
-    根据期望损失给出停止决策。
+    Stopping decision based on expected loss.
 
-    expected_loss_a = E[max(B-A, 0)] = 选 A 的机会成本（B 有多大概率更好且好多少）
-    expected_loss_b = E[max(A-B, 0)] = 选 B 的机会成本（A 有多大概率更好且好多少）
+    expected_loss_a = E[max(B-A, 0)] = opportunity cost of choosing A
+    expected_loss_b = E[max(A-B, 0)] = opportunity cost of choosing B
 
-    - 若选 A 的机会成本很低 → B 几乎不可能更好 → 安全地保持 A
-    - 若选 B 的机会成本很低 → A 几乎不可能更好 → 可以安全地切换到 B
+    - Low loss for A → B is unlikely to be better → safe to Keep A
+    - Low loss for B → A is unlikely to be better → safe to Ship B
     """
     if result.expected_loss_a < loss_threshold:
-        return "保持 A"
+        return "Keep A"
     elif result.expected_loss_b < loss_threshold:
-        return "上线 B"
+        return "Launch B"
     else:
-        return "继续收集数据"
+        return "Collect More Data"
 
 
 def frequentist_decision(result: FrequentistResult) -> str:
-    """根据显著性给出停止决策。"""
+    """Stopping decision based on statistical significance."""
     if not result.significant:
-        return "保持 A（无显著差异）"
-    return "上线 B" if result.delta > 0 else "保持 A（B 更差）"
+        return "Keep A (No Significant Difference)"
+    return "Launch B" if result.delta > 0 else "Keep A (B is Worse)"
