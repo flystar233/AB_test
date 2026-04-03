@@ -1,9 +1,10 @@
 """
-ABTestPipeline：统一入口，路由到正确的分析器，聚合并输出结果。
+ABTestPipeline: unified entry point that routes to the correct analyzer
+and aggregates results.
 
-支持：
-  - metric_type: "binary"（转化率/留存率）或 "continuous"（收入/GMV）
-  - method:      "frequentist"、"bayesian" 或 "both"（同时运行两种，默认）
+Supports:
+  - metric_type: "binary" (conversion/retention) or "continuous" (revenue/GMV)
+  - method:      "frequentist", "bayesian", or "both" (default)
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -27,43 +28,53 @@ class ABTestResult:
     bayesian: Optional[BayesianResult] = None
     decision_freq: Optional[str] = None
     decision_bayes: Optional[str] = None
+    detected_model: Optional[str] = None   # 'lognormal' / 'student_t' (continuous only)
+    skewness: Optional[float] = None
 
     def summary(self) -> str:
         lines = [
             "=" * 56,
-            f"  A/B 测试结果摘要  |  指标类型：{self.metric_type}",
+            f"  A/B Test Summary  |  Metric type: {self.metric_type}",
             "=" * 56,
         ]
 
         if self.frequentist:
             f = self.frequentist
-            stat_label = "z 统计量" if self.metric_type == "binary" else "t 统计量"
+            stat_label = "z-statistic" if self.metric_type == "binary" else "t-statistic"
             lines += [
                 "",
-                "【频率派】",
-                f"  A 组均值：{f.mean_a:.4f}",
-                f"  B 组均值：{f.mean_b:.4f}",
-                f"  delta  ：{f.delta:+.4f}  (B - A)",
-                f"  95% CI ：[{f.ci[0]:+.4f}, {f.ci[1]:+.4f}]",
-                f"  {stat_label}：{f.statistic:.4f}",
-                f"  p 值   ：{f.p_value:.4f}",
-                f"  效应量 ：{f.effect_size:.4f}",
-                f"  → 决策 ：{self.decision_freq}",
+                "[Frequentist]",
+                f"  Group A mean : {f.mean_a:.4f}",
+                f"  Group B mean : {f.mean_b:.4f}",
+                f"  delta        : {f.delta:+.4f}  (B - A)",
+                f"  95% CI       : [{f.ci[0]:+.4f}, {f.ci[1]:+.4f}]",
+                f"  {stat_label:<13}: {f.statistic:.4f}",
+                f"  p-value      : {f.p_value:.4f}",
+                f"  effect size  : {f.effect_size:.4f}",
+                f"  → Decision   : {self.decision_freq}",
             ]
 
         if self.bayesian:
             b = self.bayesian
+            model_label = ""
+            if self.detected_model:
+                model_label = (
+                    f"  Model: LogNormal (skewness {self.skewness:.2f}, log-transformed)"
+                    if self.detected_model == "lognormal"
+                    else f"  Model: StudentT (skewness {self.skewness:.2f}, original scale)"
+                )
             lines += [
                 "",
-                "【贝叶斯】",
-                f"  A 组后验均值：{b.mean_a:.4f}",
-                f"  B 组后验均值：{b.mean_b:.4f}",
-                f"  delta 后验均值：{b.delta_mean:+.4f}",
-                f"  P(B > A)        ：{b.prob_b_better:.1%}",
-                f"  P(delta > MDE)  ：{b.prob_practical:.1%}",
-                f"  选 A 的期望损失 ：{b.expected_loss_a:.5f}",
-                f"  选 B 的期望损失 ：{b.expected_loss_b:.5f}",
-                f"  → 决策 ：{self.decision_bayes}",
+                "[Bayesian]",
+                *([model_label] if model_label else []),
+                f"  Group A posterior mean : {b.mean_a:.4f}",
+                f"  Group B posterior mean : {b.mean_b:.4f}",
+                f"  delta posterior mean   : {b.delta_mean:+.4f}",
+                f"  P(B > A)               : {b.prob_b_better:.1%}",
+                f"  P(delta > MDE)         : {b.prob_practical:.1%}",
+                f"  Expected loss (Keep A) : {b.expected_loss_a:.5f}",
+                f"  Expected loss (Launch B) : {b.expected_loss_b:.5f}",
+                f"  → Decision             : {self.decision_bayes}",
             ]
 
         lines.append("=" * 56)
@@ -75,20 +86,20 @@ class ABTestResult:
 
 class ABTestPipeline:
     """
-    A/B 测试主流程。
+    Main A/B test pipeline.
 
     Args:
-        metric_type:       "binary" 或 "continuous"
-        method:            "frequentist"、"bayesian" 或 "both"
-        alpha:             频率派显著性水平（默认 0.05）
-        mde:               最小可检测提升（与指标同量纲）
-        loss_threshold:    贝叶斯期望损失停止阈值
-        prior_strength:    贝叶斯先验强度（等效历史样本量）
-        historical_rate:   二值先验：历史转化率（binary only）
-        historical_mean:   连续先验：历史均值（continuous only）
-        historical_std:    连续先验：历史标准差（continuous only）
-        n_samples:         贝叶斯后验蒙特卡洛采样数（binary only）
-        mcmc_draws:        MCMC 采样数（continuous only）
+        metric_type:       "binary" or "continuous"
+        method:            "frequentist", "bayesian", or "both"
+        alpha:             Frequentist significance level (default 0.05)
+        mde:               Minimum detectable effect (same unit as metric)
+        loss_threshold:    Bayesian expected-loss stopping threshold
+        prior_strength:    Bayesian prior strength (equivalent historical sample size)
+        historical_rate:   Binary prior: historical conversion rate (binary only)
+        historical_mean:   Continuous prior: historical mean (continuous only)
+        historical_std:    Continuous prior: historical std dev (continuous only)
+        n_samples:         Bayesian posterior Monte Carlo samples (binary only)
+        mcmc_draws:        MCMC draws (continuous only)
 
     Examples:
         >>> pipeline = ABTestPipeline(metric_type="binary", method="both",
@@ -110,8 +121,10 @@ class ABTestPipeline:
         historical_mean: float = None,
         historical_std: float = None,
         nu_expected: float = 30.0,
+        max_mcmc_samples: int = 800,
         n_samples: int = 200_000,
-        mcmc_draws: int = 2000,
+        mcmc_draws: int = 1000,
+        mcmc_tune: int = 500,
     ):
         self.metric_type = metric_type
         self.method = method
@@ -123,26 +136,44 @@ class ABTestPipeline:
         self.historical_mean = historical_mean
         self.historical_std = historical_std
         self.nu_expected = nu_expected
+        self.max_mcmc_samples = max_mcmc_samples
         self.n_samples = n_samples
         self.mcmc_draws = mcmc_draws
+        self.mcmc_tune = mcmc_tune
 
     def run(self, data_a: np.ndarray, data_b: np.ndarray) -> ABTestResult:
         """
-        运行 A/B 测试分析。
+        Run the A/B test analysis.
 
         Args:
-            data_a: A 组（对照组）数据
-            data_b: B 组（实验组）数据
+            data_a: Group A (control) data
+            data_b: Group B (treatment) data
 
         Returns:
-            ABTestResult 包含所有指标和决策建议
+            ABTestResult containing all metrics and decision recommendations
         """
         data_a = np.asarray(data_a, dtype=float)
         data_b = np.asarray(data_b, dtype=float)
 
+        # ── Validation ────────────────────────────────────────────
+        if len(data_a) == 0 or len(data_b) == 0:
+            raise ValueError("Group A or B is empty. Check your group column and labels.")
+        if np.any(np.isnan(data_a)) or np.any(np.isnan(data_b)):
+            raise ValueError("Data contains NaN values. Please clean the data first.")
+        if np.any(np.isinf(data_a)) or np.any(np.isinf(data_b)):
+            raise ValueError("Data contains Inf values. Please clean the data first.")
+        if self.metric_type == "binary":
+            unique_a = set(np.unique(data_a))
+            unique_b = set(np.unique(data_b))
+            if not unique_a.issubset({0.0, 1.0}) or not unique_b.issubset({0.0, 1.0}):
+                raise ValueError(
+                    "Binary metric data must contain only 0 and 1. "
+                    "Check that you selected the correct metric column."
+                )
+
         result = ABTestResult(metric_type=self.metric_type, method=self.method)
 
-        # ── 频率派 ─────────────────────────────────────────────────
+        # ── Frequentist ───────────────────────────────────────────
         if self.method in ("frequentist", "both"):
             if self.metric_type == "binary":
                 freq = two_proportion_ztest(data_a, data_b, alpha=self.alpha)
@@ -151,7 +182,7 @@ class ABTestPipeline:
             result.frequentist = freq
             result.decision_freq = frequentist_decision(freq)
 
-        # ── 贝叶斯 ─────────────────────────────────────────────────
+        # ── Bayesian ──────────────────────────────────────────────
         if self.method in ("bayesian", "both"):
             if self.metric_type == "binary":
                 model = BayesianBinary(
@@ -166,12 +197,17 @@ class ABTestPipeline:
                     historical_std=self.historical_std,
                     prior_strength=self.prior_strength,
                     nu_expected=self.nu_expected,
+                    max_mcmc_samples=self.max_mcmc_samples,
                     mcmc_draws=self.mcmc_draws,
+                    mcmc_tune=self.mcmc_tune,
                     mde=self.mde,
                 )
             bayes = model.fit(data_a, data_b)
             result.bayesian = bayes
             result.decision_bayes = bayesian_decision(bayes, self.loss_threshold)
+            if self.metric_type == "continuous":
+                result.detected_model = model.detected_model
+                result.skewness       = model.skewness
 
         return result
 
@@ -184,22 +220,22 @@ class ABTestPipeline:
         treatment_label: str = "gate_40",
     ) -> ABTestResult:
         """
-        从 CSV 文件加载数据并运行分析。
+        Load data from a CSV file and run the analysis.
 
         Args:
-            filepath:         CSV 文件路径
-            group_col:        分组列名（如 'version'）
-            metric_col:       指标列名（如 'retention_1' 或 'revenue'）
-            control_label:    对照组标签（A 组）
-            treatment_label:  实验组标签（B 组）
+            filepath:         Path to the CSV file
+            group_col:        Column name for group labels (e.g. 'version')
+            metric_col:       Column name for the metric (e.g. 'retention_1' or 'revenue')
+            control_label:    Label for group A (control)
+            treatment_label:  Label for group B (treatment)
         """
         df = pd.read_csv(filepath)
 
         data_a = df[df[group_col] == control_label][metric_col].values.astype(float)
         data_b = df[df[group_col] == treatment_label][metric_col].values.astype(float)
 
-        print(f"已加载数据：A 组 {len(data_a)} 条，B 组 {len(data_b)} 条")
-        print(f"A 组均值：{data_a.mean():.4f}  |  B 组均值：{data_b.mean():.4f}")
+        print(f"Data loaded: Group A {len(data_a)} rows, Group B {len(data_b)} rows")
+        print(f"Group A mean: {data_a.mean():.4f}  |  Group B mean: {data_b.mean():.4f}")
         print()
 
         return self.run(data_a, data_b)
@@ -207,18 +243,18 @@ class ABTestPipeline:
     def plot(
         self,
         result: ABTestResult,
-        metric_label: str = "指标",
+        metric_label: str = "Metric",
         save_dir: Optional[str] = None,
         show: bool = True,
     ):
         """
-        绘制分析结果图表。
+        Plot analysis results.
 
         Args:
-            result:       ABTestResult 对象
-            metric_label: 图表中指标的显示名称
-            save_dir:     图片保存目录（None 则不保存）
-            show:         是否弹出交互窗口
+            result:       ABTestResult object
+            metric_label: Display name for the metric in charts
+            save_dir:     Directory to save plots (None = don't save)
+            show:         Whether to open an interactive window
         """
         from .visualizer import plot_bayesian, plot_frequentist
         import os
