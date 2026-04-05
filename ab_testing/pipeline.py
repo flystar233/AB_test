@@ -4,11 +4,12 @@ and aggregates results.
 
 Supports:
   - metric_type: "binary" (conversion/retention) or "continuous" (revenue/GMV)
-  - method:      "frequentist", "bayesian", or "both" (default)
+  - method:      "frequentist", "bayesian", "both" (default), or "sequential"
+  - sequential:  Group sequential testing with alpha spending (O'Brien-Fleming, Pocock)
 """
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal, Optional, List, Dict, Any
 import textwrap
 
 import numpy as np
@@ -18,6 +19,7 @@ from .metrics import FrequentistResult, BayesianResult, bayesian_decision, frequ
 from .frequentist import two_proportion_ztest, welch_ttest
 from .bayesian_binary import BayesianBinary
 from .bayesian_continuous import BayesianContinuous
+from .sequential import SequentialTest, SequentialResult
 
 
 @dataclass
@@ -26,8 +28,10 @@ class ABTestResult:
     method: str
     frequentist: Optional[FrequentistResult] = None
     bayesian: Optional[BayesianResult] = None
+    sequential: Optional[SequentialResult] = None
     decision_freq: Optional[str] = None
     decision_bayes: Optional[str] = None
+    decision_seq: Optional[str] = None
     detected_model: Optional[str] = None   # 'lognormal' / 'student_t' (continuous only)
     skewness: Optional[float] = None
 
@@ -77,6 +81,17 @@ class ABTestResult:
                 f"  → Decision             : {self.decision_bayes}",
             ]
 
+        if self.sequential:
+            s = self.sequential
+            lines += [
+                "",
+                "[Sequential]",
+                f"  Method       : {s.method}",
+                f"  Total looks  : {len(s.looks)}",
+                f"  Current look : {s.current_look}",
+                f"  → Decision   : {self.decision_seq}",
+            ]
+
         lines.append("=" * 56)
         return "\n".join(lines)
 
@@ -90,7 +105,7 @@ class ABTestPipeline:
 
     Args:
         metric_type:       "binary" or "continuous"
-        method:            "frequentist", "bayesian", or "both"
+        method:            "frequentist", "bayesian", "both", or "sequential"
         alpha:             Frequentist significance level (default 0.05)
         mde:               Minimum detectable effect (same unit as metric)
         loss_threshold:    Bayesian expected-loss stopping threshold
@@ -100,6 +115,9 @@ class ABTestPipeline:
         historical_std:    Continuous prior: historical std dev (continuous only)
         n_samples:         Bayesian posterior Monte Carlo samples (binary only)
         mcmc_draws:        MCMC draws (continuous only)
+        sequential_method: Sequential testing method: "obrien_fleming", "pocock", "wang_tsiatis"
+        sequential_looks:  Maximum number of looks for sequential testing
+        sequential_n:      Expected total sample size for sequential testing
 
     Examples:
         >>> pipeline = ABTestPipeline(metric_type="binary", method="both",
@@ -107,12 +125,24 @@ class ABTestPipeline:
         >>> result = pipeline.run(data_a, data_b)
         >>> result.print_summary()
         >>> pipeline.plot(result)
+
+        >>> # Sequential testing
+        >>> seq_pipeline = ABTestPipeline(
+        ...     metric_type="binary",
+        ...     method="sequential",
+        ...     sequential_method="obrien_fleming",
+        ...     sequential_looks=5,
+        ... )
+        >>> # Look 1
+        >>> result1 = seq_pipeline.run_sequential(data_a[:2000], data_b[:2000], look=1)
+        >>> # Look 2
+        >>> result2 = seq_pipeline.run_sequential(data_a[:4000], data_b[:4000], look=2)
     """
 
     def __init__(
         self,
         metric_type: Literal["binary", "continuous"] = "binary",
-        method: Literal["frequentist", "bayesian", "both"] = "both",
+        method: Literal["frequentist", "bayesian", "both", "sequential"] = "both",
         alpha: float = 0.05,
         mde: float = 0.005,
         loss_threshold: float = 0.001,
@@ -125,6 +155,10 @@ class ABTestPipeline:
         n_samples: int = 200_000,
         mcmc_draws: int = 1000,
         mcmc_tune: int = 500,
+        sequential_method: Literal["obrien_fleming", "pocock", "wang_tsiatis"] = "obrien_fleming",
+        sequential_looks: int = 5,
+        sequential_n: Optional[int] = None,
+        sequential_wang_delta: float = 0.5,
     ):
         self.metric_type = metric_type
         self.method = method
@@ -141,21 +175,15 @@ class ABTestPipeline:
         self.mcmc_draws = mcmc_draws
         self.mcmc_tune = mcmc_tune
 
-    def run(self, data_a: np.ndarray, data_b: np.ndarray) -> ABTestResult:
-        """
-        Run the A/B test analysis.
+        # Sequential testing parameters
+        self.sequential_method = sequential_method
+        self.sequential_looks = sequential_looks
+        self.sequential_n = sequential_n
+        self.sequential_wang_delta = sequential_wang_delta
+        self._sequential_test: Optional[SequentialTest] = None
 
-        Args:
-            data_a: Group A (control) data
-            data_b: Group B (treatment) data
-
-        Returns:
-            ABTestResult containing all metrics and decision recommendations
-        """
-        data_a = np.asarray(data_a, dtype=float)
-        data_b = np.asarray(data_b, dtype=float)
-
-        # ── Validation ────────────────────────────────────────────
+    def _validate_data(self, data_a: np.ndarray, data_b: np.ndarray) -> None:
+        """Validate input data."""
         if len(data_a) == 0 or len(data_b) == 0:
             raise ValueError("Group A or B is empty. Check your group column and labels.")
         if np.any(np.isnan(data_a)) or np.any(np.isnan(data_b)):
@@ -171,6 +199,21 @@ class ABTestPipeline:
                     "Check that you selected the correct metric column."
                 )
 
+    def run(self, data_a: np.ndarray, data_b: np.ndarray) -> ABTestResult:
+        """
+        Run the A/B test analysis.
+
+        Args:
+            data_a: Group A (control) data
+            data_b: Group B (treatment) data
+
+        Returns:
+            ABTestResult containing all metrics and decision recommendations
+        """
+        data_a = np.asarray(data_a, dtype=float)
+        data_b = np.asarray(data_b, dtype=float)
+
+        self._validate_data(data_a, data_b)
         result = ABTestResult(metric_type=self.metric_type, method=self.method)
 
         # ── Frequentist ───────────────────────────────────────────
@@ -209,6 +252,99 @@ class ABTestPipeline:
                 result.detected_model = model.detected_model
                 result.skewness       = model.skewness
 
+        # ── Sequential (single look for backward compatibility) ────
+        if self.method == "sequential":
+            # For single look, just initialize but don't run
+            pass
+
+        return result
+
+    def init_sequential(self) -> "ABTestPipeline":
+        """
+        Initialize or reset the sequential test.
+
+        Call this before starting a new sequential test with multiple looks.
+        """
+        self._sequential_test = SequentialTest(
+            method=self.sequential_method,
+            metric_type=self.metric_type,
+            alpha=self.alpha,
+            max_looks=self.sequential_looks,
+            expected_total_n=self.sequential_n,
+            wang_tsiatis_delta=self.sequential_wang_delta,
+            two_sided=True,
+        )
+        return self
+
+    def run_sequential(
+        self,
+        data_a: np.ndarray,
+        data_b: np.ndarray,
+        look: Optional[int] = None,
+    ) -> ABTestResult:
+        """
+        Run sequential test with accumulating data.
+
+        Call this method repeatedly with more data each time (e.g., first 20%,
+        then 40%, etc.). The pipeline automatically tracks the state between calls.
+
+        Args:
+            data_a: Group A data (cumulative up to this look)
+            data_b: Group B data (cumulative up to this look)
+            look: Optional look index (1-based). If None, auto-increments.
+
+        Returns:
+            ABTestResult with sequential test results
+
+        Example:
+            >>> pipeline = ABTestPipeline(method="sequential", sequential_looks=5)
+            >>> pipeline.init_sequential()
+            >>> # Look 1 with 20% data
+            >>> result1 = pipeline.run_sequential(data_a[:2000], data_b[:2000])
+            >>> # Look 2 with 40% data
+            >>> result2 = pipeline.run_sequential(data_a[:4000], data_b[:4000])
+            >>> # Check final result
+            >>> print(result2.decision_seq)
+        """
+        data_a = np.asarray(data_a, dtype=float)
+        data_b = np.asarray(data_b, dtype=float)
+
+        self._validate_data(data_a, data_b)
+
+        # Initialize sequential test if not already initialized
+        if self._sequential_test is None:
+            self.init_sequential()
+
+        # Add this look
+        decision = self._sequential_test.add_look(data_a, data_b)
+
+        # Get result
+        seq_result = self._sequential_test.get_result()
+
+        # Create ABTestResult
+        result = ABTestResult(metric_type=self.metric_type, method="sequential")
+        result.sequential = seq_result
+        result.decision_seq = decision
+
+        # Also run frequentist for comparison
+        if self.metric_type == "binary":
+            freq = two_proportion_ztest(data_a, data_b, alpha=self.alpha)
+        else:
+            freq = welch_ttest(data_a, data_b, alpha=self.alpha)
+        result.frequentist = freq
+        result.decision_freq = frequentist_decision(freq)
+
+        return result
+
+    def get_sequential_result(self) -> Optional[ABTestResult]:
+        """Get the current sequential test result without adding new data."""
+        if self._sequential_test is None or not self._sequential_test.looks:
+            return None
+
+        seq_result = self._sequential_test.get_result()
+        result = ABTestResult(metric_type=self.metric_type, method="sequential")
+        result.sequential = seq_result
+        result.decision_seq = seq_result.final_decision
         return result
 
     def run_from_csv(

@@ -5,10 +5,11 @@ All functions return standard ECharts option dicts (Python dicts); no pyecharts 
 from __future__ import annotations
 import numpy as np
 from scipy.stats import gaussian_kde
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from .metrics import BayesianResult, FrequentistResult
+    from .sequential import SequentialResult
 
 # ── Colors ────────────────────────────────────────────────────────
 C_A      = "#e74c3c"   # red:    Group A
@@ -220,5 +221,228 @@ def freq_chart(result: "FrequentistResult", metric_label: str = "Metric", mde: f
                     ]],
                 },
             }
+        ],
+    }
+
+
+# ── 5. Sequential testing boundary chart ─────────────────────────
+def sequential_chart(result: "SequentialResult") -> dict:
+    """
+    Chart showing sequential test statistics over time with rejection boundaries.
+
+    Displays:
+    - Test statistic path over looks
+    - Upper and lower rejection boundaries
+    - Information rates on x-axis
+    """
+    looks = result.looks
+    boundaries = result.boundary_values
+    info_rates = result.information_rates
+
+    # Create x-axis labels as percentages
+    x_labels = [f"{int(t * 100)}%" for t in info_rates]
+
+    # Prepare data points - use category indices instead of values
+    look_indices = list(range(1, len(looks) + 1))
+    stats = [look.statistic for look in looks]
+    decisions = [look.decision for look in looks]
+
+    # Symmetric boundaries (two-sided test)
+    upper_bound = boundaries[:len(looks)]
+    lower_bound = [-b for b in upper_bound]
+
+    # Determine colors for each point based on decision
+    point_colors = []
+    for dec in decisions:
+        if dec == "Reject H0":
+            point_colors.append("#e74c3c")  # Red - rejected
+        else:
+            point_colors.append("#3498db")  # Blue - continuing
+
+    # Build series - use category axis for simplicity
+    series = []
+
+    # Planned boundary lines (dashed)
+    series.append({
+        "name": "Upper Bound",
+        "type": "line",
+        "data": planned_upper if 'planned_upper' in locals() else boundaries,
+        "lineStyle": {"color": "#95a5a6", "type": "dashed", "width": 2},
+        "symbol": "none",
+    })
+    series.append({
+        "name": "Lower Bound",
+        "type": "line",
+        "data": [-b for b in boundaries],
+        "lineStyle": {"color": "#95a5a6", "type": "dashed", "width": 2},
+        "symbol": "none",
+    })
+
+    # Zero line
+    series.append({
+        "name": "Zero",
+        "type": "line",
+        "data": [0 for _ in info_rates],
+        "lineStyle": {"color": "#7f8c8d", "type": "solid", "width": 1},
+        "symbol": "none",
+    })
+
+    # Actual statistic path - only for executed looks
+    # Create data with None for unexecuted looks
+    stat_data = []
+    for i in range(len(info_rates)):
+        if i < len(stats):
+            stat_data.append(stats[i])
+        else:
+            stat_data.append(None)
+
+    series.append({
+        "name": "Test Statistic",
+        "type": "line",
+        "data": stat_data,
+        "lineStyle": {"color": "#3498db", "width": 3},
+        "itemStyle": {
+            "color": point_colors + ["#3498db"] * (len(info_rates) - len(point_colors)),
+            "borderColor": "#2980b9",
+            "borderWidth": 2,
+        },
+        "symbol": "circle",
+        "symbolSize": 10,
+        "connectNulls": False,
+    })
+
+    # Determine y-axis range
+    all_values = boundaries + [-b for b in boundaries] + stats
+    y_min = min(all_values) * 1.2
+    y_max = max(all_values) * 1.2
+    y_range = max(abs(y_min), abs(y_max))
+
+    return {
+        "title": {
+            "text": f"Sequential Test: {result.method} | α = {result.alpha:.3f}",
+            "subtext": f"Final Decision: {result.final_decision}",
+            "left": "center",
+        },
+        "tooltip": {
+            "trigger": "axis",
+            "axisPointer": {"type": "cross"},
+        },
+        "legend": {
+            "data": ["Test Statistic", "Upper Bound", "Lower Bound"],
+            "top": 50,
+        },
+        "grid": {
+            "top": 100,
+            "bottom": 70,
+            "left": 60,
+            "right": 40,
+        },
+        "xAxis": {
+            "type": "category",
+            "name": "Information Rate",
+            "nameLocation": "middle",
+            "nameGap": 40,
+            "data": x_labels,
+        },
+        "yAxis": {
+            "type": "value",
+            "name": "Test Statistic (z-score)",
+            "min": -y_range,
+            "max": y_range,
+        },
+        "series": series,
+        "color": ["#3498db", "#95a5a6", "#95a5a6"],
+    }
+
+
+def sequential_metrics_chart(result: "SequentialResult") -> dict:
+    """
+    Chart showing key metrics over sequential looks:
+    - Sample sizes over time
+    - Treatment effect (delta) over time
+    - P-values over time
+    """
+    looks = result.looks
+
+    look_indices = list(range(1, len(looks) + 1))
+    n_a = [look.n_a for look in looks]
+    n_b = [look.n_b for look in looks]
+    deltas = [look.mean_b - look.mean_a for look in looks]
+    p_values = [look.p_value for look in looks]
+
+    return {
+        "title": {
+            "text": "Metrics Evolution Over Looks",
+            "left": "center",
+        },
+        "tooltip": {
+            "trigger": "axis",
+        },
+        "legend": {
+            "data": ["N (A)", "N (B)", "Delta (B-A)", "P-value"],
+            "top": 40,
+        },
+        "grid": {
+            "top": 80,
+            "bottom": 50,
+            "left": 60,
+            "right": 60,
+        },
+        "xAxis": {
+            "type": "category",
+            "data": [f"Look {i}" for i in look_indices],
+        },
+        "yAxis": [
+            {
+                "type": "value",
+                "name": "Sample Size",
+                "position": "left",
+            },
+            {
+                "type": "value",
+                "name": "Delta",
+                "position": "right",
+                "offset": 0,
+            },
+            {
+                "type": "value",
+                "name": "P-value",
+                "position": "right",
+                "offset": 60,
+                "min": 0,
+                "max": 1,
+            },
+        ],
+        "series": [
+            {
+                "name": "N (A)",
+                "type": "bar",
+                "data": n_a,
+                "itemStyle": {"color": "#e74c3c", "opacity": 0.7},
+            },
+            {
+                "name": "N (B)",
+                "type": "bar",
+                "data": n_b,
+                "itemStyle": {"color": "#27ae60", "opacity": 0.7},
+            },
+            {
+                "name": "Delta (B-A)",
+                "type": "line",
+                "yAxisIndex": 1,
+                "data": deltas,
+                "itemStyle": {"color": "#8e44ad"},
+            },
+            {
+                "name": "P-value",
+                "type": "line",
+                "yAxisIndex": 2,
+                "data": p_values,
+                "itemStyle": {"color": "#f39c12"},
+                "markLine": {
+                    "data": [{"yAxis": 0.05, "name": "α=0.05"}],
+                    "lineStyle": {"type": "dashed", "color": "#e74c3c"},
+                },
+            },
         ],
     }

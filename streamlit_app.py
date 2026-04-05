@@ -37,12 +37,28 @@ def _analysis_worker(pipeline, data_a, data_b, state: dict) -> None:
         state["error"]  = str(e)
         state["status"] = "error"
 
+
+def _sequential_worker(pipeline, data_a, data_b, reset_seq: bool, state: dict) -> None:
+    """Background daemon thread for sequential testing."""
+    try:
+        if reset_seq or pipeline._sequential_test is None:
+            pipeline.init_sequential()
+        result = pipeline.run_sequential(data_a, data_b)
+        state["result"]   = result
+        state["pipeline"] = pipeline
+        state["status"]   = "done"
+    except Exception as e:
+        state["error"]  = str(e)
+        state["status"] = "error"
+
 from ab_testing import ABTestPipeline
 from ab_testing.visualizer_echarts import (
     posterior_chart,
     delta_chart,
     loss_chart,
     freq_chart,
+    sequential_chart,
+    sequential_metrics_chart,
 )
 from scipy.stats import chisquare
 
@@ -309,222 +325,204 @@ def show_change_password_page():
 
 
 # ══════════════════════════════════════════════════════════════════
-# Main analysis page
+# Main analysis page - SIMPLIFIED VERSION
 # ══════════════════════════════════════════════════════════════════
 def show_analysis_page():
-    # ── Sidebar: parameter configuration ─────────────────────────
+    # ── Sidebar: Simple configuration ─────────────────────────────
     with st.sidebar:
-        st.title("⚙️ Configuration")
+        st.title("🧪 A/B Test")
 
-        method = st.radio(
-            "Analysis Method",
-            ["both", "bayesian", "frequentist"],
-            format_func=lambda x: {
-                "both":        "Both methods",
-                "bayesian":    "Bayesian only",
-                "frequentist": "Frequentist only",
-            }[x],
+        # Step 1: Quick Mode Selection
+        st.markdown("### 1. Analysis Mode")
+
+        # Track mode changes to clear results when switching
+        prev_mode = st.session_state.get("_prev_mode", None)
+        mode = st.radio(
+            "Choose analysis mode",
+            ["Quick Analysis", "Monitor Over Time", "Expert Mode"],
+            horizontal=True,
+            label_visibility="collapsed",
         )
 
-        metric_type = st.radio(
-            "Metric Type",
-            ["binary", "continuous"],
-            format_func=lambda x: {
-                "binary":     "Binary (conversion / retention)",
-                "continuous": "Continuous (revenue / spend)",
-            }[x],
-        )
+        # Clear results if mode changed
+        if prev_mode is not None and prev_mode != mode:
+            for key in ["result", "pipeline", "worker_state", "worker_thread", "running"]:
+                if key in st.session_state:
+                    st.session_state.pop(key, None)
+
+        st.session_state["_prev_mode"] = mode
+
+        # Map mode to internal parameters
+        if mode == "Quick Analysis":
+            method = "both"
+            show_advanced = False
+        elif mode == "Monitor Over Time":
+            method = "sequential"
+            show_advanced = False
+        else:
+            method = "both"
+            show_advanced = st.checkbox("Show advanced settings", value=False)
 
         st.divider()
-        st.subheader("Statistical Parameters")
-        alpha = 0.05
-        if method != "bayesian":
-            alpha = st.slider("Significance level α (frequentist)", 0.01, 0.10, 0.05, 0.01)
-        mde = st.number_input(
-            "MDE (Minimum Detectable Effect)",
-            value=0.005 if metric_type == "binary" else 3.0,
-            format="%.4f",
-            help="Same unit as the metric. Use absolute difference for binary, amount for continuous.",
-        )
 
-        if method != "frequentist":
+        # Step 2: Metric Type (simple)
+        st.markdown("### 2. Metric Type")
+        metric_type = st.radio(
+            "What type of metric?",
+            ["Binary", "Continuous"],
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+        metric_type = metric_type.lower()
+
+        # Smart defaults based on metric type
+        if metric_type == "binary":
+            default_mde = 0.005
+            default_alpha = 0.05
+        else:
+            default_mde = 3.0
+            default_alpha = 0.05
+
+        # Advanced settings (hidden by default)
+        alpha = default_alpha
+        mde = default_mde
+        sequential_method = "obrien_fleming"
+        sequential_looks = 5
+
+        if show_advanced or mode == "Expert Mode":
             st.divider()
-            st.subheader("Bayesian Parameters")
+            st.markdown("### ⚙️ Advanced Settings")
+
+            if mode == "Expert Mode":
+                method = st.radio(
+                    "Analysis Method",
+                    ["both", "bayesian", "frequentist", "sequential"],
+                    format_func=lambda x: {
+                        "both":        "Both Frequentist + Bayesian",
+                        "bayesian":    "Bayesian only",
+                        "frequentist": "Frequentist only",
+                        "sequential":  "Sequential testing",
+                    }[x],
+                )
+
+            if method != "bayesian":
+                alpha = st.slider(
+                    "Significance level α",
+                    0.01, 0.10, default_alpha, 0.01,
+                    help="Probability of Type I error (false positive)"
+                )
+
+            mde = st.number_input(
+                "MDE (Minimum Detectable Effect)",
+                value=default_mde,
+                format="%.4f",
+                help="Smallest effect you care about detecting"
+            )
+
+            if method == "sequential":
+                sequential_method = st.selectbox(
+                    "Sequential method",
+                    ["obrien_fleming", "pocock"],
+                    format_func=lambda x: {
+                        "obrien_fleming": "O'Brien-Fleming (conservative)",
+                        "pocock": "Pocock (easier to stop early)",
+                    }[x],
+                )
+                sequential_looks = st.slider(
+                    "Max number of looks",
+                    min_value=2, max_value=10, value=5,
+                )
+
+        # Bayesian parameters - hide in quick mode
+        loss_threshold = 0.001 if metric_type == "binary" else 1.0
+        prior_strength = 100
+        historical_rate = 0.44
+        historical_mean = 50.0
+        historical_std = 30.0
+        nu_expected = 30.0
+        n_samples = 200000
+        mcmc_draws = 1000
+        mcmc_tune = 500
+        max_mcmc_samples = 1000
+        sequential_n = None
+        sequential_wang_delta = 0.5
+
+        if (show_advanced or mode == "Expert Mode") and method != "frequentist":
+            st.divider()
+            st.markdown("### 🎲 Bayesian Settings")
             loss_threshold = st.number_input(
-                "Expected Loss Threshold (decision threshold)",
+                "Expected Loss Threshold",
                 value=0.001 if metric_type == "binary" else 1.0,
                 format="%.4f",
-                help=(
-                    "After analysis, if the expected loss of choosing a variant is below this threshold "
-                    "the corresponding decision is output; otherwise 'Collect More Data' is returned, "
-                    "indicating the experiment needs more data before a decision can be made."
-                ),
+                help="Decision threshold for expected loss"
             )
-
-            n_samples        = 200000
-            mcmc_draws       = 1000
-            mcmc_tune        = 500
-            max_mcmc_samples = 1000
-
+            prior_strength = st.slider(
+                "Prior strength",
+                min_value=1, max_value=500, value=100,
+                help="How much to trust historical data"
+            )
             if metric_type == "binary":
-                n_samples = st.number_input(
-                    "Monte Carlo samples",
-                    min_value=10000, max_value=1000000, value=200000, step=10000,
-                    help="More samples = more stable posterior, but slower.",
+                historical_rate = st.slider(
+                    "Historical conversion rate",
+                    0.01, 0.99, 0.44, 0.01,
                 )
             else:
-                max_mcmc_samples = st.slider(
-                    "Max samples per group passed to MCMC",
-                    min_value=200, max_value=2000, value=1000, step=100,
-                    help=(
-                        "Posterior precision saturates around 1000 rows (CLT). "
-                        "Extra data only increases per-step likelihood cost without improving conclusions. "
-                        "Excess data is stratified-subsampled automatically."
-                    ),
-                )
-                mcmc_draws = st.number_input(
-                    "NUTS draws",
-                    min_value=200, max_value=5000, value=1000, step=100,
-                    help="NumPyro NUTS posterior samples per chain. 1000 is usually sufficient.",
-                )
-                mcmc_tune = st.number_input(
-                    "NUTS warmup steps",
-                    min_value=100, max_value=2000, value=500, step=100,
-                    help="NumPyro NUTS warm-up phase for step-size tuning; not included in posterior samples.",
-                )
+                historical_mean = st.number_input("Historical mean", value=50.0)
+                historical_std = st.number_input("Historical std dev", value=30.0, min_value=0.01)
 
-            st.divider()
-            st.subheader("Bayesian Prior")
-            st.caption(
-                "⚠️ Priors must come from **pre-experiment** historical data or domain knowledge. "
-                "**Never** derive them from the current A/B test data — doing so double-counts "
-                "the data and distorts the posterior."
-            )
+    # ── Main area: Clean and simple ─────────────────────────────
+    st.title("🧪 A/B Test Analysis")
 
-            prior_source = st.radio(
-                "Prior source",
-                ["Manual input", "Upload historical data (auto-estimate)"],
-                horizontal=True,
-                help="Historical data: same metric collected before the experiment (independent dataset).",
-            )
+    if mode == "Quick Analysis":
+        st.caption("Fast, smart defaults — perfect for most analyses")
+    elif mode == "Monitor Over Time":
+        st.caption("Watch results accumulate — stop early when evidence is clear")
+    else:
+        st.caption("Full control for experts — tweak every parameter")
 
-            historical_rate = 0.5
-            historical_mean = None
-            historical_std  = None
-            nu_expected     = 30.0
-            prior_strength  = 2
-
-            if prior_source == "Manual input":
-                if metric_type == "binary":
-                    historical_rate = st.slider(
-                        "Historical conversion rate",
-                        0.01, 0.99, 0.44, 0.01,
-                        help="From historical reports or a previous experiment — not the current test data.",
-                    )
-                else:
-                    historical_mean = st.number_input(
-                        "Historical mean (mu)",
-                        value=50.0, format="%.2f",
-                        help="Same unit as the metric; derived from pre-experiment historical data.",
-                    )
-                    historical_std = st.number_input(
-                        "Historical std dev (sigma)",
-                        value=30.0, min_value=0.01, format="%.2f",
-                        help="Historical standard deviation; controls the width of the prior.",
-                    )
-                    nu_expected = st.slider(
-                        "Degrees of freedom prior expectation (nu)",
-                        min_value=3, max_value=100, value=30,
-                        help=(
-                            "Controls StudentT tail thickness:\n"
-                            "• nu ≈ 3–5: very heavy tails, suitable for highly skewed revenue\n"
-                            "• nu ≈ 10–20: moderate heavy tails, common revenue scenario\n"
-                            "• nu ≈ 30+: approaches normal distribution"
-                        ),
-                    )
-                prior_strength = st.slider(
-                    "Prior strength (equivalent historical sample size)",
-                    min_value=1, max_value=500, value=100,
-                    help="Higher = more trust in historical data. With sufficient experiment data, keep this low (≤10).",
-                )
-
-            else:
-                hist_file = st.file_uploader(
-                    "Upload historical CSV (pre-experiment, independent dataset)",
-                    type=["csv"],
-                    key="hist_upload",
-                )
-                if hist_file:
-                    hist_df   = pd.read_csv(hist_file)
-                    hist_col  = st.selectbox("Select metric column", hist_df.columns.tolist(), key="hist_col")
-                    hist_vals = hist_df[hist_col].dropna().values.astype(float)
-
-                    if metric_type == "binary":
-                        historical_rate = float(hist_vals.mean())
-                        st.success(f"Estimated historical rate: **{historical_rate:.4f}** (n={len(hist_vals):,})")
-                    else:
-                        historical_mean = float(hist_vals.mean())
-                        historical_std  = float(hist_vals.std())
-                        st.success(
-                            f"Estimated mean: **{historical_mean:.4f}**  "
-                            f"Std dev: **{historical_std:.4f}** (n={len(hist_vals):,})"
-                        )
-                        nu_expected = st.slider(
-                            "Degrees of freedom prior expectation (nu)",
-                            min_value=3, max_value=100, value=30,
-                            help=(
-                                "Controls StudentT tail thickness:\n"
-                                "• nu ≈ 3–5: very heavy tails\n"
-                                "• nu ≈ 10–20: moderate heavy tails\n"
-                                "• nu ≈ 30+: approaches normal"
-                            ),
-                        )
-
-                    prior_strength = st.slider(
-                        "Prior strength",
-                        min_value=1, max_value=500,
-                        value=min(max(int(len(hist_vals) / 10), 1), 200),
-                        help="Recommended: ~1/10 of the historical sample size to avoid over-weighting the prior.",
-                    )
-                else:
-                    st.info("Upload a historical data file to auto-estimate prior parameters.")
-        else:
-            loss_threshold   = 0.001 if metric_type == "binary" else 1.0
-            n_samples        = 200000
-            mcmc_draws       = 1000
-            mcmc_tune        = 500
-            max_mcmc_samples = 1000
-            historical_rate  = 0.5
-            historical_mean  = None
-            historical_std   = None
-            nu_expected      = 30.0
-            prior_strength   = 2
-
-    # ── Main area ─────────────────────────────────────────────────
-    st.title("🧪 A/B Test Analysis Platform")
-    st.caption("Frequentist (Z-test / Welch t-test)  ×  Bayesian (Beta-Bernoulli / StudentT)  —  side-by-side comparison")
     st.divider()
 
-    # ── Data loading ──────────────────────────────────────────────
+    # ── Step 1: Load Data ─────────────────────────────────────────
     st.subheader("① Load Data")
+
+    # Track data source changes to clear results when switching
+    prev_data_source = st.session_state.get("_prev_data_source", None)
     data_source = st.radio(
         "Data source",
-        ["Sample datasets", "Upload CSV"],
+        ["Try sample data", "Upload my CSV"],
         horizontal=True,
     )
+
+    # Clear results if data source changed
+    if prev_data_source is not None and prev_data_source != data_source:
+        for key in ["result", "pipeline", "worker_state", "worker_thread", "running"]:
+            if key in st.session_state:
+                st.session_state.pop(key, None)
+
+    st.session_state["_prev_data_source"] = data_source
 
     df = None
     group_col = metric_col = control_label = treatment_label = None
     data_source_name = ""
 
-    if data_source == "Sample datasets":
+    if data_source == "Try sample data":
         sample_options = list(SAMPLE_DATASETS.keys())
+
+        # Track sample dataset changes
+        prev_sample = st.session_state.get("_prev_sample", None)
         selected_sample = st.selectbox(
-            "Select sample dataset",
+            "Choose a sample dataset",
             sample_options,
             index=0,
-            help="Choose from pre-loaded sample datasets with different characteristics"
+            help="Quickly try different scenarios"
         )
+
+        # Clear results if sample changed
+        if prev_sample is not None and prev_sample != selected_sample:
+            for key in ["result", "pipeline", "worker_state", "worker_thread", "running"]:
+                if key in st.session_state:
+                    st.session_state.pop(key, None)
+        st.session_state["_prev_sample"] = selected_sample
 
         if selected_sample:
             config = SAMPLE_DATASETS[selected_sample]
@@ -573,7 +571,7 @@ def show_analysis_page():
             c1, c2 = st.columns(2)
             with c1:
                 group_col = st.selectbox(
-                    "Group column (A/B label column)", cols,
+                    "Group column (A/B label)", cols,
                     index=cols.index(default_group),
                 )
                 metric_col = st.selectbox(
@@ -584,33 +582,76 @@ def show_analysis_page():
             with c2:
                 if group_col:
                     groups = df[group_col].unique().tolist()
-                    control_label   = st.selectbox("Control group label (A)", groups)
+                    control_label   = st.selectbox("Control group (A)", groups)
                     treatment_label = st.selectbox(
-                        "Treatment group label (B)", [g for g in groups if g != control_label]
+                        "Treatment group (B)", [g for g in groups if g != control_label]
                     )
 
     st.divider()
 
-    # ── Run analysis ──────────────────────────────────────────────
+    # ── Step 2: Run Analysis ──────────────────────────────────────
     st.subheader("② Run Analysis")
 
     ready   = df is not None and all([group_col, metric_col, control_label, treatment_label])
     running = st.session_state.get("running", False)
 
-    col_btn, col_status = st.columns([2, 5])
+    # Always create status placeholder
+    status_placeholder = st.empty()
 
-    with col_btn:
-        run_btn = st.button("🚀 Run Analysis", type="primary",
-                            disabled=not ready or running, width="stretch")
+    # Handle reset button first (before any other logic)
+    if method == "sequential" and ready:
+        # Check if reset button was clicked in a previous rerun
+        if st.session_state.get("_reset_seq_pending", False):
+            st.session_state.pop("pipeline", None)
+            st.session_state.pop("result", None)
+            st.session_state.pop("_reset_seq_pending", None)
+            st.rerun()
 
-    with col_status:
-        status_placeholder = st.empty()
+    # Sequential testing specific UI
+    if method == "sequential" and ready:
+        st.info(
+            "📊 **Monitor Mode**  \n"
+            "Use the slider to simulate data accumulating over time. "
+            "Start small and increase gradually!"
+        )
+
+        full_data_a = df[df[group_col] == control_label][metric_col].values.astype(float)
+        full_data_b = df[df[group_col] == treatment_label][metric_col].values.astype(float)
+
+        col_pct, col_reset, col_run = st.columns([2, 1, 1])
+        with col_pct:
+            data_pct = st.slider(
+                "Percentage of data to use",
+                min_value=10, max_value=100, value=50, step=10,
+                help="Select what percentage of the full dataset to use for this look"
+            )
+        with col_reset:
+            if st.button("🔄 New Test", help="Reset and start a new sequential test"):
+                st.session_state["_reset_seq_pending"] = True
+                st.rerun()
+        with col_run:
+            run_btn = st.button("📊 Add Look", type="primary", disabled=not ready or running, use_container_width=True)
+
+        # Calculate current data based on percentage
+        n_a_current = max(10, int(len(full_data_a) * data_pct / 100))
+        n_b_current = max(10, int(len(full_data_b) * data_pct / 100))
+
+        st.caption(f"Current: {n_a_current:,} (A) + {n_b_current:,} (B) = {n_a_current + n_b_current:,} total samples")
+
+        data_a = full_data_a[:n_a_current]
+        data_b = full_data_b[:n_b_current]
+    else:
+        col_btn, _ = st.columns([1, 2])
+        with col_btn:
+            run_btn = st.button("🚀 Run Analysis", type="primary",
+                                disabled=not ready or running, use_container_width=True)
+
+        if ready:
+            data_a = df[df[group_col] == control_label][metric_col].values.astype(float)
+            data_b = df[df[group_col] == treatment_label][metric_col].values.astype(float)
 
     # ── Launch analysis ───────────────────────────────────────────
     if not running and ready and "run_btn" in dir() and run_btn:
-        data_a = df[df[group_col] == control_label][metric_col].values.astype(float)
-        data_b = df[df[group_col] == treatment_label][metric_col].values.astype(float)
-
         pipeline_kwargs = dict(
             metric_type=metric_type,
             method=method,
@@ -629,20 +670,39 @@ def show_analysis_page():
                 pipeline_kwargs["mcmc_tune"]        = int(mcmc_tune)
                 pipeline_kwargs["max_mcmc_samples"] = int(max_mcmc_samples)
                 pipeline_kwargs["nu_expected"]      = float(nu_expected)
-                if historical_mean is not None:
-                    pipeline_kwargs["historical_mean"] = historical_mean
-                if historical_std is not None:
-                    pipeline_kwargs["historical_std"]  = historical_std
+                pipeline_kwargs["historical_mean"] = historical_mean
+                pipeline_kwargs["historical_std"]  = historical_std
+
+        if method == "sequential":
+            pipeline_kwargs["sequential_method"] = sequential_method
+            pipeline_kwargs["sequential_looks"] = sequential_looks
+            pipeline_kwargs["sequential_n"] = sequential_n
+            pipeline_kwargs["sequential_wang_delta"] = sequential_wang_delta
 
         pipeline = ABTestPipeline(**pipeline_kwargs)
 
+        # Reuse existing pipeline for sequential testing if available
+        reset_for_worker = False
+        if method == "sequential" and "pipeline" in st.session_state:
+            pipeline = st.session_state["pipeline"]
+        elif method == "sequential":
+            reset_for_worker = True
+
         worker_state: dict = {"status": "running", "result": None,
                               "pipeline": None, "error": None}
-        thread = threading.Thread(
-            target=_analysis_worker,
-            args=(pipeline, data_a, data_b, worker_state),
-            daemon=True,
-        )
+
+        if method == "sequential":
+            thread = threading.Thread(
+                target=_sequential_worker,
+                args=(pipeline, data_a, data_b, reset_for_worker, worker_state),
+                daemon=True,
+            )
+        else:
+            thread = threading.Thread(
+                target=_analysis_worker,
+                args=(pipeline, data_a, data_b, worker_state),
+                daemon=True,
+            )
         thread.start()
 
         st.session_state["running"]          = True
@@ -684,6 +744,10 @@ def show_analysis_page():
             st.session_state.pop("worker_state",  None)
             st.session_state.pop("worker_thread", None)
             status_placeholder.success("✅ Analysis complete")
+
+            # For sequential testing, keep the pipeline in session state
+            if method == "sequential":
+                st.session_state["pipeline"] = pipeline
 
             # ── Auto-save to database ─────────────────────────────
             user = st.session_state.get("user")
@@ -770,17 +834,19 @@ def show_analysis_page():
                 )
 
         def _decision_banner(decision: str, method_name: str):
-            if "Launch B" in decision:
-                st.success(f"**{method_name} Decision: {decision}**  — Group B outperforms")
-            elif "Keep A" in decision:
-                st.info(f"**{method_name} Decision: {decision}**  — Group A is better or no significant difference")
+            if "Launch B" in decision or "Reject H0" in decision:
+                st.success(f"**{method_name} Decision: {decision}**")
+            elif "Keep A" in decision or "Accept H0" in decision:
+                st.info(f"**{method_name} Decision: {decision}**")
             else:
-                st.warning(f"**{method_name} Decision: {decision}**  — More data needed")
+                st.warning(f"**{method_name} Decision: {decision}**")
 
         if result.frequentist and result.decision_freq:
             _decision_banner(result.decision_freq, "[Frequentist]")
         if result.bayesian and result.decision_bayes:
             _decision_banner(result.decision_bayes, "[Bayesian]")
+        if result.sequential and result.decision_seq:
+            _decision_banner(result.decision_seq, "[Sequential]")
 
         def _card(label: str, value: str, sub: str = "", sub_color: str = "#555") -> str:
             return (
@@ -838,7 +904,7 @@ def show_analysis_page():
         st.markdown("---")
 
         # ── Frequentist charts ────────────────────────────────────
-        if result.frequentist:
+        if result.frequentist and not result.sequential:
             st.markdown("#### Frequentist: Mean Comparison & Confidence Interval")
             st_echarts(
                 options=freq_chart(result.frequentist, metric_label=m_label, mde=pipeline.mde),
@@ -847,7 +913,7 @@ def show_analysis_page():
             )
 
         # ── Bayesian charts ───────────────────────────────────────
-        if result.bayesian:
+        if result.bayesian and not result.sequential:
             b = result.bayesian
             st.markdown("#### Bayesian: Posterior Distribution & Decision Metrics")
 
@@ -896,6 +962,45 @@ def show_analysis_page():
                     key="chart_loss",
                 )
 
+        # ── Sequential testing charts ─────────────────────────────────
+        if result.sequential:
+            s = result.sequential
+            st.markdown("#### Sequential: Test Boundaries & Metrics Over Time")
+
+            # Key metrics for sequential test
+            if s.looks:
+                last_look = s.looks[-1]
+                _kpi_row([
+                    ("Current Look", f"{s.current_look} / {len(s.boundary_values)}"),
+                    ("N (A)", f"{last_look.n_a:,}"),
+                    ("N (B)", f"{last_look.n_b:,}"),
+                    ("Test Statistic", f"{last_look.statistic:+.4f}"),
+                    ("Naive p-value", f"{last_look.p_value:.4f}" if last_look.p_value else "-"),
+                ])
+
+            tab_seq1, tab_seq2 = st.tabs(["Boundary Chart", "Metrics Evolution"])
+
+            with tab_seq1:
+                st.caption(
+                    "Test statistic path vs. rejection boundaries. "
+                    "Crossing a boundary indicates a statistically significant result."
+                )
+                st_echarts(
+                    options=sequential_chart(s),
+                    height="420px",
+                    key="chart_seq_boundary",
+                )
+
+            with tab_seq2:
+                st_echarts(
+                    options=sequential_metrics_chart(s),
+                    height="400px",
+                    key="chart_seq_metrics",
+                )
+
+            with st.expander("📋 View Sequential Test Details"):
+                st.code(s.summary(), language=None)
+
         with st.expander("📋 View Full Text Summary"):
             st.code(result.summary(), language=None)
 
@@ -911,6 +1016,7 @@ else:
     page = st.session_state.get("page", "Analysis")
 
     with st.sidebar:
+        st.divider()
         col_name, col_pop = st.columns([3, 1])
         with col_name:
             st.markdown(f"👤 **{user['username']}**")
