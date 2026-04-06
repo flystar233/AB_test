@@ -49,8 +49,8 @@ def posterior_chart(result: "BayesianResult", metric_label: str = "Metric") -> d
 
     return {
         "tooltip": {"trigger": "axis", "axisPointer": {"type": "cross"}},
-        "legend": {"data": ["Group A Posterior", "Group B Posterior"], "top": 30},
-        "grid": {"top": 70, "bottom": 50, "left": 60, "right": 20},
+        "legend": {"data": ["Group A Posterior", "Group B Posterior"], "top": 8},
+        "grid": {"top": 50, "bottom": 50, "left": 65, "right": 20},
         "xAxis": {
             "type": "value",
             "name": metric_label,
@@ -86,9 +86,9 @@ def delta_chart(result: "BayesianResult", mde: float, metric_label: str = "Metri
     }
 
     return {
-        "title": {"text": prob_text, "textStyle": {"fontSize": 12, "fontWeight": "normal"}, "top": 5},
+        "title": {"text": prob_text, "textStyle": {"fontSize": 12, "fontWeight": "normal"}, "top": 4, "left": "center"},
         "tooltip": {"trigger": "axis", "axisPointer": {"type": "cross"}},
-        "grid": {"top": 55, "bottom": 50, "left": 60, "right": 20},
+        "grid": {"top": 50, "bottom": 55, "left": 65, "right": 20},
         "xAxis": {
             "type": "value",
             "name": f"B − A ({metric_label})",
@@ -109,11 +109,11 @@ def loss_chart(result: "BayesianResult", loss_threshold: float) -> dict:
 
     return {
         "tooltip": {"trigger": "axis"},
-        "grid": {"top": 40, "bottom": 60, "left": 70, "right": 20},
+        "grid": {"top": 40, "bottom": 80, "left": 70, "right": 20},
         "xAxis": {
             "type": "category",
-            "data": ["Expected Loss (Keep A)", "Expected Loss (Launch B)"],
-            "axisLabel": {"fontSize": 12},
+            "data": ["Keep A", "Launch B"],
+            "axisLabel": {"fontSize": 13},
         },
         "yAxis": {"type": "value", "name": "Expected Loss"},
         "series": [
@@ -162,23 +162,21 @@ def freq_chart(result: "FrequentistResult", metric_label: str = "Metric", mde: f
         ref_mde = round(ref_a + mde, 6)
         mark_lines.append({"yAxis": ref_mde, "name": f"A+MDE {ref_mde}", "lineStyle": {"color": C_THRESH, "type": "dotted"}})
 
-    title_text = (
-        f"p = {result.p_value:.4f}  {sig_label}  |  "
-        f"Effect size = {result.effect_size:.4f}  |  "
-        f"delta 95% CI = [{ci_low:+.4f}, {ci_high:+.4f}]"
-    )
-    if mde is not None:
-        title_text += f"  |  MDE = {mde:.4f}"
+    mde_part = f"  |  MDE = {mde:.4f}" if mde is not None else ""
+    title_text = f"p = {result.p_value:.4f}  {sig_label}  |  Effect size = {result.effect_size:.4f}{mde_part}"
+    subtext = f"delta 95% CI = [{ci_low:+.4f}, {ci_high:+.4f}]"
 
     return {
         "title": {
             "text": title_text,
+            "subtext": subtext,
             "textStyle": {"fontSize": 12, "fontWeight": "normal", "color": sig_color},
-            "top": 5,
+            "subtextStyle": {"fontSize": 11, "color": "#666"},
+            "top": 4,
         },
         "tooltip": {"trigger": "axis"},
         "legend": {"show": False},
-        "grid": {"top": 60, "bottom": 60, "left": 70, "right": 20},
+        "grid": {"top": 72, "bottom": 60, "left": 70, "right": 20},
         "xAxis": {
             "type": "category",
             "data": ["Group A (Control)", "Group B (Treatment)"],
@@ -311,17 +309,25 @@ def sequential_chart(result: "SequentialResult") -> dict:
         "connectNulls": False,
     })
 
+    # Round series data to 4 decimal places
+    def _r(v, n=4):
+        return round(v, n) if v is not None else None
+
+    series[-1]["data"] = [_r(v) for v in stat_data]
+    series[0]["data"] = [_r(v) for v in series[0]["data"]]
+    series[1]["data"] = [_r(v) for v in series[1]["data"]]
+
     # Determine y-axis range
     all_values = boundaries + [-b for b in boundaries] + stats
     y_min = min(all_values) * 1.2
     y_max = max(all_values) * 1.2
-    y_range = max(abs(y_min), abs(y_max))
+    y_range = round(max(abs(y_min), abs(y_max)), 2)
 
     return {
         "title": {
-            "text": f"Sequential Test: {result.method} | α = {result.alpha:.3f}",
-            "subtext": f"Final Decision: {result.final_decision}",
+            "text": f"Sequential Test: {result.method} | α = {result.alpha:.3f} | Decision: {result.final_decision}",
             "left": "center",
+            "textStyle": {"fontSize": 13},
         },
         "tooltip": {
             "trigger": "axis",
@@ -329,19 +335,16 @@ def sequential_chart(result: "SequentialResult") -> dict:
         },
         "legend": {
             "data": ["Test Statistic", "Upper Bound", "Lower Bound"],
-            "top": 50,
+            "bottom": 0,
         },
         "grid": {
-            "top": 100,
-            "bottom": 70,
-            "left": 60,
-            "right": 40,
+            "top": 50,
+            "bottom": 40,
+            "left": 65,
+            "right": 30,
         },
         "xAxis": {
             "type": "category",
-            "name": "Information Rate",
-            "nameLocation": "middle",
-            "nameGap": 40,
             "data": x_labels,
         },
         "yAxis": {
